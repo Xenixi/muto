@@ -31,6 +31,7 @@ public class MutoApp {
 
 	static Wini config;
 	static List<String> paths;
+	static Socket css = null;
 	static String connectedServer = null;
 	
 	
@@ -39,6 +40,7 @@ public class MutoApp {
 	static String defaultPort;
 	
 	public static void main(String[] args) throws IOException {
+		css = new Socket();
 		File configFile = new File("./config.ini");
 		if (!configFile.exists()) {
 			configFile.createNewFile();
@@ -91,6 +93,7 @@ public class MutoApp {
 
 			while (true) {
 				// main prompt
+				//POLL SERVER PERIODICALLY TO DETECT OUTAGE
 				if (connectedServer == null) {
 					System.out.println("\n[DISCONNECTED] {n/a}\nEnter Command ('h' for help):");
 				} else {
@@ -105,7 +108,7 @@ public class MutoApp {
 					System.out.println("We've got you");
 					System.out.println("Reference: ");
 					System.out.println(
-							"Help - h\nExit - x\nOpen GUI - LAUNCHGUI\n\nLibrary Add - la | LA\nLibrary Remove - lrm | LRM\n\nOpen Config File - cf | config | configuration");
+							"Help - h\nExit - x\nOpen GUI - LAUNCHGUI\n\nLibrary Add - la | LA <directorypath>\nLibrary Remove - lrm | LRM <directorypath>\n\nOpen Config File - cf | config | configuration\n\nConnect Server - cn | CN <hostname:ip>\nDisconnect Server - dc | DC");
 				} else if (cmd.equalsIgnoreCase("x")) {
 					// exit command
 					System.out.println("bye!");
@@ -174,10 +177,11 @@ public class MutoApp {
 					} else {
 						
 						System.out.println("Attempting connection to '" + server + ":" + port + "'");
-						Socket soc = new Socket();
+						
 						
 						try {
-							soc.connect(socketAddress, timeout);
+							css.connect(socketAddress, timeout);
+							connectedServer = css.getInetAddress().getHostAddress() + ":" + css.getPort();
 							
 							//implement multithreading here for connection handling and begin server-side code
 						} catch (Exception d) {
@@ -188,7 +192,18 @@ public class MutoApp {
 						System.out.println("Invalid internet address");
 					}
 
-				} else {
+				} else if(cmd.equalsIgnoreCase("dc")){
+					if(connectedServer != null) {
+						System.out.println("Closing connection to '" + css.getInetAddress().getHostAddress() + ":" + css.getPort() + "'");
+						connectedServer = null; 
+						css.close();
+						css = new Socket();
+						System.out.println("Successfully disconnected from the server");
+					} else {
+						System.out.println("No server currently connected");
+					}
+				}
+				else {
 					// catch all unrecognized input --
 					System.out.println("-Invalid command-");
 				}
