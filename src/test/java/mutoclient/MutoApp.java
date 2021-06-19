@@ -2,12 +2,18 @@ package mutoclient;
 
 import java.awt.Desktop;
 import java.awt.Dimension;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketException;
 import java.net.UnknownHostException;
+import java.security.KeyPair;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -24,6 +30,7 @@ import org.ini4j.Options;
 import org.ini4j.Wini;
 
 import mutoclient.config.Format;
+import speedy.rsatools.SpeedyRSA;
 
 import org.ini4j.Profile.Section;
 
@@ -33,12 +40,18 @@ public class MutoApp {
 	static List<String> paths;
 	static Socket css = null;
 	static String connectedServer = null;
-	
-	
-	//conf
+	static boolean serverStatus = false;
+	static Thread handler = null, pingThread = null;
+
+	static KeyPair keys;
+
+	static long lastPing = 0;
+	static boolean ping = false;
+
+	// conf
 	static int timeout;
 	static String defaultPort;
-	
+
 	public static void main(String[] args) throws IOException {
 		css = new Socket();
 		File configFile = new File("./config.ini");
@@ -62,8 +75,6 @@ public class MutoApp {
 		config.put("Muto", "Program Runs", (config.fetch("Muto", "Program Runs") == null ? 1
 				: Integer.parseInt(config.fetch("Muto", "Program Runs")) + 1));
 
-	
-
 		paths = new ArrayList<String>();
 		if (config.fetch("Libraries", "Paths") != null) {
 
@@ -73,13 +84,13 @@ public class MutoApp {
 			}
 
 		}
-		if(config.fetch("Network", "Timeout") == null) {
+		if (config.fetch("Network", "Timeout") == null) {
 			config.put("Network", "Timeout", "2000");
 		}
-		if(config.fetch("Network", "DefaultPort") == null) {
+		if (config.fetch("Network", "DefaultPort") == null) {
 			config.put("Network", "DefaultPort", "8657");
 		}
-		
+
 		timeout = Integer.parseInt(config.fetch("Network", "Timeout"));
 		defaultPort = config.fetch("Network", "DefaultPort");
 		config.store();
@@ -90,15 +101,21 @@ public class MutoApp {
 			Scanner inputReader = new Scanner(System.in);
 
 			// command loop (runs until program exit or GUI launch)
-
+			System.out.println("Waiting for command input... ('h' for help)");
 			while (true) {
 				// main prompt
-				//POLL SERVER PERIODICALLY TO DETECT OUTAGE
+				// POLL SERVER PERIODICALLY TO DETECT OUTAGE
 				if (connectedServer == null) {
-					System.out.println("\n[DISCONNECTED] {n/a}\nEnter Command ('h' for help):");
+					System.out.println("\n[DISCONNECTED] {n/a}:\n");
 				} else {
-					System.out.println("\n[CONNECTED] {Server=" + connectedServer.split(":")[0] + " Port="
-							+ connectedServer.split(":")[1] + "}\nEnter Command ('h' for help):");
+					if (serverStatus) {
+						System.out.println("\n[CONNECTED] {Server=" + connectedServer.split(":")[0] + " Port="
+								+ connectedServer.split(":")[1] + "}:\n");
+					} else {
+						System.out.println("\n[CONNECTION-VERIFYING...] {Server=" + connectedServer.split(":")[0]
+								+ " Port=" + connectedServer.split(":")[1] + "}:\n");
+					}
+
 				}
 
 				String cmd = inputReader.nextLine();
@@ -165,53 +182,197 @@ public class MutoApp {
 
 				} else if (cmd.startsWith("cn ") || cmd.startsWith("CN ")) {
 					String server = cmd.substring(3).contains(":") ? cmd.substring(3).split(":")[0] : cmd.substring(3);
-					//default port for MUTO is 8657
-					int port = Integer.parseInt((cmd.substring(3).contains(":") ? cmd.substring(3).split(":")[1] : defaultPort));
+					// default port for MUTO is 8657
+					int port = Integer
+							.parseInt((cmd.substring(3).contains(":") ? cmd.substring(3).split(":")[1] : defaultPort));
 					try {
-					InetAddress adr = InetAddress.getByName(server);
-					InetSocketAddress socketAddress = new InetSocketAddress(adr.getHostAddress(), port);
-					
-					
-					if (server.equals("") || adr == null) {
-						throw new UnknownHostException();
-					} else {
-						
-						System.out.println("Attempting connection to '" + server + ":" + port + "'");
-						
-						
-						try {
-							css.connect(socketAddress, timeout);
-							connectedServer = css.getInetAddress().getHostAddress() + ":" + css.getPort();
-							
-							//implement multithreading here for connection handling and begin server-side code
-						} catch (Exception d) {
-							System.out.println("Failed to connect to server '" + socketAddress.getAddress() + ":" + socketAddress.getPort() + "'");
+						InetAddress adr = InetAddress.getByName(server);
+						InetSocketAddress socketAddress = new InetSocketAddress(adr.getHostAddress(), port);
+
+						if (server.equals("") || adr == null) {
+							throw new UnknownHostException();
+						} else {
+
+							System.out.println("Attempting connection to '" + server + ":" + port + "'");
+
+							try {
+								css.connect(socketAddress, timeout);
+								connectedServer = css.getInetAddress().getHostAddress() + ":" + css.getPort();
+
+								/////
+
+								handler = new Thread(new Runnable() {
+
+									public void run() {
+
+										BufferedReader read;
+										try {
+											read = new BufferedReader(
+													new InputStreamReader(css.getInputStream(), "UTF8"));
+
+											long timeBegin = System.currentTimeMillis();
+
+											while (true) {
+												String result;
+												try {
+
+													result = read.readLine();
+													long deltaT = System.currentTimeMillis() - timeBegin;
+													// result must be returned within 5 seconds.
+													if (result.equals("MUTOSERVER-VERIFY-") && deltaT < 5000L) {
+														BufferedWriter send = new BufferedWriter(
+																new OutputStreamWriter(css.getOutputStream(), "UTF8"));
+														send.append("MUTOCLIENT-RETURN-").append("\n");
+														send.flush();
+														// send.close();
+														System.out.println("Client-Server verified.");
+														serverStatus = true;
+														System.out.println("\n[CONNECTED] {Server="
+																+ connectedServer.split(":")[0] + " Port="
+																+ connectedServer.split(":")[1] + "}:\n");
+														break;
+
+													} else {
+
+														css.close();
+														css = new Socket();
+														connectedServer = null;
+														System.out
+																.println("Muto client was unable to verify server. Disconnected.\n");
+														handler.interrupt();
+													}
+
+												} catch (IOException e) {
+													System.err.println("\n*Connection Closed\n");
+													break;
+
+												}
+
+											}
+											// read.close();
+
+											SpeedyRSA rsa = new SpeedyRSA(4096);
+
+											final InputStreamReader isr = new InputStreamReader(css.getInputStream(),
+													"UTF-8");
+											final BufferedReader in = new BufferedReader(isr);
+											final OutputStreamWriter osw = new OutputStreamWriter(css.getOutputStream(),
+													"UTF-8");
+											final BufferedWriter out = new BufferedWriter(osw);
+
+											// PING LOOP
+											pingThread = new Thread(new Runnable() {
+
+												public void run() {
+													while (true) {
+														try {
+															Thread.sleep(2000);
+
+															if (!ping) {
+																out.append("ping").append("\n");
+																out.flush();
+
+																lastPing = System.currentTimeMillis();
+															} else {
+																System.out.println(
+																		"No response for 2000ms - disconnected.\n");
+																css.close();
+																css = new Socket();
+																connectedServer = null;
+																handler.interrupt();
+																break;
+															}
+
+														} catch (InterruptedException e) {
+															e.printStackTrace();
+														} catch (SocketException e) {
+
+															System.out.println("Disconnected from the server.\n");
+
+															css = new Socket();
+															connectedServer = null;
+															handler.interrupt();
+															break;
+
+														} catch (IOException e) {
+
+															e.printStackTrace();
+														}
+
+													}
+													pingThread.interrupt();
+												}
+											});
+
+											pingThread.start();
+
+											// LISTEN LOOP
+											while (true) {
+												try {
+													String readLine = in.readLine();
+
+													if (readLine.equalsIgnoreCase("pong") && ping) {
+
+														ping = false;
+														if ((System.currentTimeMillis() - lastPing) > 1000) {
+															System.out.println(
+																	"1000ms+ latency detected - Disconnected.\n");
+															css.close();
+															css = new Socket();
+															connectedServer = null;
+															handler.interrupt();
+															break;
+														}
+													}
+												} catch (NullPointerException | SocketException ee) {
+													System.out.println("Connection closed.\n");
+													css = new Socket();
+													connectedServer = null;
+													handler.interrupt();
+													break;
+												}
+											}
+
+										} catch (IOException e1) {
+											e1.printStackTrace();
+										}
+									}
+
+								});
+								handler.start();
+
+							} catch (Exception d) {
+								System.out.println("Failed to connect to server '" + socketAddress.getAddress() + ":"
+										+ socketAddress.getPort() + "'");
+							}
 						}
-					}
-					} catch(UnknownHostException e) {
-						System.out.println("Invalid internet address");
+					} catch (UnknownHostException e) {
+						System.out.println("Invalid internet address.");
 					}
 
-				} else if(cmd.equalsIgnoreCase("dc")){
-					if(connectedServer != null) {
-						System.out.println("Closing connection to '" + css.getInetAddress().getHostAddress() + ":" + css.getPort() + "'");
-						connectedServer = null; 
+				} else if (cmd.equalsIgnoreCase("dc")) {
+					if (connectedServer != null) {
+						System.out.println("Closing connection to '" + css.getInetAddress().getHostAddress() + ":"
+								+ css.getPort() + "'");
+						connectedServer = null;
+
 						css.close();
 						css = new Socket();
-						System.out.println("Successfully disconnected from the server");
+						System.out.println("Successfully disconnected from the server\n");
 					} else {
-						System.out.println("No server currently connected");
+						System.out.println("No server currently connected\n");
 					}
-				}
-				else {
+				} else {
 					// catch all unrecognized input --
-					System.out.println("-Invalid command-");
+					System.out.println("-Invalid command-\n");
 				}
 
 			}
-			inputReader.close();
+			// inputReader.close();
 
-		} else if (args[0].equalsIgnoreCase("gui")) {
+		} else if (args[0].equalsIgnoreCase("gui"))
+
+		{
 			// GUI MODE --
 			SwingUtilities.invokeLater(new Runnable() {
 
